@@ -89,6 +89,10 @@ def calculate_inclination(points, idx: int) -> float:
 class WCARaceGeometry(gym.Env):
     """
     A gymnasium environment for the race circuit at the WCUSA map in BeamNG.tech.
+
+    TODO:
+    Problem - when the vehicle restarts it automatically restarts at a pose but with zero velocity initial conditions (w how scenario.restart() works, and how scenario.add_vehicle() is designed.
+               need to probably change those functions to take in the full initial state.)
     """
     sps = 50
     rate = 5
@@ -103,7 +107,7 @@ class WCARaceGeometry(gym.Env):
     starting_proj = 1710
     max_damage = 100
 
-    def __init__(self, host='localhost', port=64256, home=None):
+    def __init__(self, host='localhost', port=64256, home=None,  num_adversaries = 0):
         self.steps = WCARaceGeometry.sps // WCARaceGeometry.rate
         self.host = host
         self.port = port
@@ -124,6 +128,8 @@ class WCARaceGeometry(gym.Env):
         self.vehicle = Vehicle('racecar', model='sunburst', license='BEAMNG',
                                color='red',
                                part_config='vehicles/sunburst/hillclimb.pc')
+        self.num_adversaries #TODO: add as part of constructor. Also, do we want a hyperparameter that is num of adversaries to consider (ie, there are 4 cars but we only consider the closest 2)
+        self.adversaries = self.add_adversaries(num_adversaries)
 
         electrics = Electrics()
         damage = Damage()
@@ -131,7 +137,16 @@ class WCARaceGeometry(gym.Env):
         self.vehicle.sensors.attach('damage', damage)
 
         scenario = Scenario('west_coast_usa', 'wca_race_geometry_v0')
-        scenario.add_vehicle(self.vehicle, pos=(394.5, -247.925, 145.25), rot_quat=angle_to_quat((0, 0, 90)))
+      
+        box_range = [(394.0, 395.0), (-248.0, -247.0), (145.0, 146.0)]  # Position range near the given coordinates
+        velocity_range = (5, 20)  # Velocity range in m/s,#TODO: make these part of constructor
+        
+
+
+        vehicles = [self.vehicle] + self.adversaries
+
+        self.setup_vehicles_with_random_states(scenario, vehicles, box_range, velocity_range)
+
 
         scenario.make(self.bng)
 
@@ -147,6 +162,63 @@ class WCARaceGeometry(gym.Env):
 
         self.bng.scenario.start()
         self.bng.control.pause()
+
+    def setup_vehicles_with_random_states(self,scenario, vehicle_list, box_range, velocity_range):
+        """
+        Set up multiple vehicles (ego and adversaries) with initial starting poses and add them to Scenario
+        """
+        for vehicle in vehicle_list:
+            random_state = self.generate_random_state(box_range, velocity_range)
+
+            scenario.add_vehicle(
+                vehicle, 
+                pos=tuple(random_state["pos"]),
+                rot_quat=tuple(random_state["rotation"])
+            )
+
+    def generate_random_state(self,box_range, velocity_range):
+        '''
+        Generate an initial random state on the track
+        '''
+        pos = np.array([
+            np.random.uniform(box_range[0][0], box_range[0][1]),  # x range
+            np.random.uniform(box_range[1][0], box_range[1][1]),  # y range
+            np.random.uniform(0.0, 0.0)   #TODO: am assuming flat track with z at sea level? (otherwise need to align so car is on surface of map at spawn point)
+        ])
+        
+        up = np.array([0, 0, 1]) #TODO:assuming flat. otherwise will need to get bank of track at spawn point and project
+        
+        yaw_angle = np.random.uniform(-np.pi, np.pi)  
+        
+        dir = np.array([np.cos(yaw_angle), np.sin(yaw_angle), 0])  # TODO: initial condition zero vehicle slip (if car is spawned moving may need to calculate expected starting slip from dynamics)
+        
+        rotation = angle_to_quat((0, 0,yaw_angle)) # Yaw only
+        
+        forward_velocity = np.random.uniform(velocity_range[0], velocity_range[1]) #This is longitudunal
+        vel = forward_velocity * dir # TODO: for now just along direction vector since assume zero vehicle slip
+        
+    
+        # Return the state dictionary
+        state = {
+            "pos": pos,
+            "dir": dir,
+            "up": up,
+            "vel": vel,
+            "rotation": rotation
+        }
+        
+        return state
+
+
+
+    def add_adversaries(self,num_adversaries):
+        adversaries = []
+        for i in range(num_adversaries):
+            vehicle_id = f'adversary_{i+1}'
+            vehicle = Vehicle(vehicle_id, model='sunburst', license=f'ADV{i+1}', 
+                            color='blue', part_config='vehicles/sunburst/hillclimb.pc')
+            adversaries.append(vehicle)
+        return adversaries
 
     def __del__(self):
         """
@@ -359,6 +431,13 @@ class WCARaceGeometry(gym.Env):
             ret.append(width)
 
         return ret
+    
+    def get_state_closest_n_adversaries(self,adversaries, n_adv_to_consider):
+        """
+        Take the n adversaries closest to the ego, and return their relative states to the ego. If no adveraries, or less than n, the relative distances are set to negative infitity, with velocity set to zero (hopefully learned to be not considered)
+        
+        """
+
 
     def _spine_project_vehicle(self, vehicle_pos):
         """
